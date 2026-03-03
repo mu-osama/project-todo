@@ -1,15 +1,33 @@
 const Todo = require("../models/todo.model");
+const client = require("../config/redis.js");
 
 exports.getTodos = async (req, res) => {
   const { user } = req;
+  const cacheKey = `todos:${user.id}`;
   try {
+    const cached = await client.get(cacheKey);
+
+    if (cached) {
+      console.log("Serving from redis ⚡");
+      return res.json({
+        isSuccess: true,
+        todos: JSON.parse(cached),
+      });
+    }
+
     const todos = await Todo.find({ user: user.id }).populate(
       "user",
       "-password",
     );
 
+    await client.set(cacheKey, JSON.stringify(todos), {
+      EX: 60,
+    });
+
     return res.send({ isSuccess: true, todos });
   } catch (error) {
+    console.log(error);
+
     return res
       .status(500)
       .send({ isSuccess: false, message: "Internal server error" });
@@ -29,10 +47,101 @@ exports.createTodo = async (req, res) => {
   }
   try {
     const todo = await Todo.create({ title, description, user: user.id });
+    await client.del(`todos:${user.id}`);
+
     return res.send({ isSuccess: true, todo });
   } catch (error) {
     return res
       .status(500)
       .send({ isSuccess: false, message: "Internal server error" });
+  }
+};
+
+exports.deleteTodo = async (req, res) => {
+  const { todoId } = req.params;
+  const { user } = req;
+
+  if (!todoId) {
+    return res
+      .status(400)
+      .json({ isSuccess: false, message: "PostId is required" });
+  }
+
+  try {
+    const findTodo = await Todo.findOne({ _id: todoId });
+
+    if (findTodo.user.toString() !== req.user.id.toString()) {
+      return res.status(401).send({
+        isSuccess: false,
+        message: "Unauthorized Cannot delete someone else post",
+      });
+    }
+
+    const deletePost = await Todo.findByIdAndDelete({
+      _id: todoId,
+      user: req.user.id,
+    });
+
+    if (!deletePost) {
+      return res
+        .status(404)
+        .send({ isSuccess: false, message: "Post does not deleted" });
+    }
+
+    await client.del(`todos:${user.id}`);
+
+    return res
+      .status(200)
+      .json({ isSuccess: false, message: "Post deleted successfully" });
+  } catch (error) {
+    console.log(error);
+
+    return res
+      .status(500)
+      .send({ isSuccess: false, message: "internal server error" });
+  }
+};
+
+exports.updatePost = async (req, res) => {
+  const { todoId } = req.params;
+  const { title } = req.body;
+  const { user } = req;
+
+  if (!todoId) {
+    return res
+      .status(409)
+      .json({ isSuccess: false, message: "postId is required" });
+  }
+  try {
+    // Todo
+    const findTodo = await Todo.findOne({ _id: todoId });
+    if (!findTodo)
+      return res
+        .status(409)
+        .json({ isSuccess: false, message: "Post not found" });
+
+    if (findTodo.user.toString() !== req.user.id.toString()) {
+      return res
+        .status(401)
+        .json({ isSuccess: false, message: "Cannot update this post" });
+    }
+
+    const updatedPost = await Todo.findByIdAndUpdate(
+      todoId,
+      { title },
+      { new: true },
+    );
+
+    await client.del(`todos:${user.id}`);
+    res.status(200).json({
+      isSuccess: false,
+      message: "Todo updated successfully",
+      todo: updatedPost,
+    });
+  } catch (error) {
+    console.log(error);
+    return res
+      .status(500)
+      .json({ isSuccess: false, message: "internal sever error" });
   }
 };
